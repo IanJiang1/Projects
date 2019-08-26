@@ -12,23 +12,55 @@ def bound(arr, lower, upper):
     arr[arr > upper] = upper
     return arr
 
+def lower_bound(arr, lower):
+    arr[arr < lower] = lower
+    return arr
+
+def upper_bound(arr, upper):
+    arr[arr > upper] = upper
+    return arr
+
 def g(z):
     """Computes the sigmoid function at the value specified by z; z can be of any dimensions"""    
     return np.divide(1, 1 + np.exp(-z))
 
-def relu(z):
-    return z * (z > 0)
+def relu(z, a):
+    return a * z * (z > 0)
 
 class Activation(object):
-     def __init__(self, fnum):
+     def __init__(self, fnum, *argv):
          if fnum == 1:
+             # Logistic function: f(x) = 1 / ( 1 + exp(-x) )
              self.name = "logistic"
              self.f = g
              self.deriv = lambda x: x * (1 - x)
          if fnum == 2:
+             # Relu function: f(x) = max(0, x)
              self.name = "relu"
-             self.f = relu
-             self.deriv = lambda x: np.ones(x.shape)         
+             self.f = lambda x: relu(x, argv[0])
+             self.deriv = lambda x: np.ones(x.shape) - (x < 0)
+         if fnum == 3:
+             # Hyperbolic Tangent: f(x) = ( 1 - exp(-x) ) / ( 1 + exp(-x) )
+             self.name = "tanh"
+             self.f = lambda x: argv[0]*np.tanh(argv[1] * x)
+             self.deriv = lambda x: argv[0] * (np.cosh(argv[1] * x)**2 - np.sinh(argv[1] * x)**2)/(np.cosh(argv[1] * x)**2)
+         if fnum == 4:
+             # Softmax: f(x) = exp(x_i) / ( exp(x_1) + exp(x_2) + ... + exp(x_n) )
+             self.name = "softmax"
+             self.f = lambda x: np.exp(x)/(np.sum(np.exp(x)))
+             self.deriv = lambda x: x*(1 - x)
+
+class Cost(object):
+    def __init__(self, fnum):
+        if fnum == 1:
+            # Mean Squared Error
+            self.f = lambda actual, predicted: (actual - predicted)**2
+            self.deriv = lambda actual, predicted: (actual - predicted)
+
+        if fnum == 2:
+            # Cross entropy
+            self.f = lambda actual, predicted: -actual * np.log(lower_bound(predicted, 1e-12))
+            self.deriv = lambda actual, predicted: predicted - actual
 
 class Learn(object):
     """A class that comprises aspects of the general supervised learning problem"""
@@ -50,12 +82,19 @@ class Learn(object):
     def add_one(self):
         self.x = np.hstack([np.ones(self.numobs)[:, np.newaxis], self.x])
 
-    def shift_register_down(self, x):
+    def shift_register_down(self, x, y):
         self.x_orig = self.x
+        self.y_orig = self.y
         setattr(self, "x", x)
+        setattr(self, "y", y)
+        self.numobs = self.x.shape[0]
+        self.numvars = self.x.shape[1]
 
     def shift_register_up(self):
         setattr(self, "x", self.x_orig)
+        setattr(self, "y", self.y_orig)
+        self.numobs = self.x.shape[0]
+        self.numvars = self.x.shape[1]
 
 class LogReg(Learn):
     """A class that comprises aspects of logistic regression problem"""
@@ -73,7 +112,8 @@ class LogReg(Learn):
     def cost(self, h, param):        
         if np.any(h < 0) | np.any(h > 1):
             raise ValueError("elements in x should be greater than 0 and less than 1")
-        return (1/self.numobs)*np.sum(-self.y*np.log(h) - (1 - self.y)*np.log(1 - h)) + self.Lambda*(0.5/self.numobs)*np.sum(param[1:]**2)
+        return (1/self.numobs)*np.sum(-self.y*np.log(h) - (1 - self.y)*np.log(1 - h))
+               #+ self.Lambda*(0.5/self.numobs)*np.sum(param[1:]**2)
 
     def model(self, param):
         param = np.array(param)
@@ -216,8 +256,9 @@ class NN(Learn):
     """y: An array of labels corresponding to each of the training examples....values are binary with either 0 or 1""" 
     """learning_rate: learning rate of the gradient descent algorithm"""
     """Lambda: regularization parameter"""
-    def __init__(self, x, y, learning_rate, Lambda, activation_func):        
+    def __init__(self, x, y, cost, learning_rate, Lambda, activation_func):
         Learn.__init__(self, x, y)
+        self.cost = cost
         self.learning_rate = learning_rate
         self.categories = list(set(list(self.y)))
         self.num_cat = len(self.categories)
@@ -236,17 +277,17 @@ class NN(Learn):
 
     def one_layer1(self, theta, fun, bias=False):
         if bias:
-            return lambda x: np.concatenate([[1], bound(fun(theta.dot(x)).flatten(), 1e-12, 1 - 1e-12)])
+            return lambda x: np.concatenate([[1], fun(theta.dot(x)).flatten()])
         else:
-            return lambda x: bound(fun(theta.dot(x)).flatten(), 1e-12, 1 - 1e-12)
+            return lambda x: fun(theta.dot(x)).flatten()
 
-    def forward1(self, thetas, bias=False):
+    def forward1(self, x, thetas, bias=False):
 
         #Initializing
-        layer = self.x
+        layer = x
         layers = []
 
-        if len(self.x.shape) < 2:
+        if len(x.shape) < 2:
             layer = layer[np.newaxis, :]
 
         #Calculating layers one-by-one
@@ -265,17 +306,12 @@ class NN(Learn):
     def backprop_onesamp1(self, sample, thetas, bias=False):
         """sample consisting of an ordered pair (x, y) where x are the features and y is the label"""
 
-        #Setting data attributes to single sample
-        self.shift_register_down(sample[0])
-
         #Initializing algorithm and getting number of layers
-        a, delta = self.forward1(thetas, bias=bias)
-        delta -= sample[1]
-        delta = delta.flatten()
-        layernum = len(thetas)
+        a, y_pred = self.forward1(sample[0], thetas, bias=bias)
+        delta = self.cost.deriv(sample[1], y_pred).flatten()
 
-        #Re-setting data to training data
-        self.shift_register_up()
+        #print("delta: " + str(delta))
+        layernum = len(thetas)
 
         #Checking if bias units are used in theta definition
         if bias:
@@ -302,13 +338,14 @@ class NN(Learn):
             D = self.backprop_onesamp1((self.x[i], self.y[i]), thetas, bias=bias)
             Delta = [Delta[l] + D[l] for l in range(numlayers)]
 
-        return [(1 / self.numobs) * (Delta[l] + self.Lambda * thetas[l]) for l in range(numlayers)]
+        return [(1 / self.numobs) * (Delta[l] + self.Lambda[l] * thetas[l]) for l in range(numlayers)]
 
-    def cost(self, h, thetas):
-        if np.any(h < 0) | np.any(h > 1):
-            raise ValueError("elements in x should be greater than 0 and less than 1")
-
-        return -(1/self.numobs)*np.sum(self.y*np.log(h) + (1 - self.y)*np.log(1 - h)) + self.Lambda*(0.5/self.numobs)*sum([(theta ** 2).sum() for theta in thetas])
+    # def cost(self, h, thetas):
+    #     if np.any(h < 0) | np.any(h > 1):
+    #         raise ValueError("elements in x should be greater than 0 and less than 1")
+    #
+    #     return -(1/self.numobs)*np.sum(self.y*np.log(h) + (1 - self.y)*np.log(1 - h))
+    #            #+ self.Lambda*(0.5/self.numobs)*sum([(theta ** 2).sum() for theta in thetas])
 	
     def rand_thetas(self, output_sizes, bias=False):
         """output_sizes: array of size layernum + 1"""
@@ -349,113 +386,62 @@ class NN(Learn):
                 thetas_minus[layernum] = thetas[layernum] - elem
                 print("thetas_plus: " + str(thetas_plus[layernum]))
                 print("thetas_minus: " + str(thetas_minus[layernum]))
-                _, h_plus = self.forward1(thetas_plus, bias=bias)
-                _, h_minus = self.forward1(thetas_minus, bias=bias)
+                _, h_plus = self.forward1(self.x, thetas_plus, bias=bias)
+                _, h_minus = self.forward1(self.x, thetas_minus, bias=bias)
                 print("Absolute difference in model values: " + str(sum(abs(h_plus - h_minus))))
                 print("h_plus size for gradient at " + str(i) + ", " + str(j) + " : " + str(h_plus.shape))
                 grad[i, j] = (self.cost(h_plus, thetas_plus) - self.cost(h_minus, thetas_minus))/(2*stepsize)
 
         return grad
 
-    def one_layer2(self, theta, fun, bias=False):
-        if bias:
-            return lambda x: np.concatenate([[1], bound(fun(theta.dot(x)).flatten(), 1e-12, 1 - 1e-12)])
-        else:
-            return lambda x: bound(fun(theta.dot(x)).flatten(), 1e-12, 1 - 1e-12)
-
-    def forward2(self, thetas, bias=False):
-
-        #Initializing
-        layer = self.x
-        layers = []
-
-        if len(self.x.shape) < 2:
-            layer = layer[np.newaxis, :]
-
-        #Calculating layers one-by-one
-        count = 0
-        for theta in thetas:
-            layer = np.apply_along_axis(self.one_layer1(theta, self.activation_func[count].f, bias=bias), 1, layer)
-            layers.append(layer)
-            count += 1
-
-        #Checking if bias unit is included
-        if bias:
-            return layers, layer[:, 1]
-        else:
-            return layers, layer
-
-    def backprop_onesamp2(self, sample, thetas, bias=False):
-        """sample consisting of an ordered pair (x, y) where x are the features and y is the label"""
-
-        #Setting data attributes to single sample
-        self.shift_register_down(sample[0])
-
-        #Initializing algorithm and getting number of layers
-        a, delta = self.forward1(thetas, bias=bias)
-        delta -= sample[1]
-        delta = delta.flatten()
-        layernum = len(thetas)
-
-        #Re-setting data to training data
-        self.shift_register_up()
-
-        #Checking if bias units are used in theta definition
-        if bias:
-            thetas = [theta[1:, :] for theta in thetas]
-            a = [x[1:] for x in a]
-
-        #Initializing gradient increment for sample
-        Delta = [np.zeros(theta.shape) for theta in thetas]
-
-        print("delta 1 shape: " + str(delta.shape))
-        print("Deltas shape: " + str([d.shape for d in Delta]))
-
-        #Backpropagation
-        for l in range(layernum - 1, 1, -1):
-            print("Running through layer " + str(l))
-            print("a shape: " + str(a[l - 1].shape))
-            print("Delta shape: " + str(Delta[l].shape))
-            print("outer product shape a * delta: " + str(np.outer(a[l - 1], delta).shape))
-            Delta[l] += np.outer(a[l - 1], delta).T
-            print("derivative shape: " + str(self.activation_func[l].deriv(a[l - 1]).flatten().shape))
-            delta = (thetas[l].T.dot(delta)) * self.activation_func[l].deriv(a[l - 1]).flatten()
-
-        return [Delta[l] for l in range(layernum)]
-
-    def backprop2(self, thetas, bias=False):
-        """Running backpropagation algorithm for all samples"""
-        
-        #Initializing gradient increment for sample
-        Delta = [np.zeros(theta.shape) for theta in thetas]
-        numlayers = len(thetas)
-        for i in range(self.numobs):
-            D = self.backprop_onesamp1((self.x[i], self.y[i]), thetas, bias=bias)
-            Delta = [Delta[l] + D[l] for l in range(numlayers)]
-
-        return [(1 / self.numobs) * (Delta[l] + self.Lambda * thetas[l]) for l in range(numlayers)]
-
-
     def gradDesc_iter(self, initthetas, bias=False):
         
         Deltas = self.backprop1(initthetas, bias=bias)
         numlayers = len(Deltas)
-        return [initthetas[i] - self.learning_rate * Deltas[i] for i in range(numlayers)]
 
-    def gradDesc(self, initthetas, max_iter, tol, bias=False):
-        
+        return [initthetas[i] - self.learning_rate[i] * Deltas[i] for i in range(numlayers)]
+
+    def gradDesc(self, initthetas, max_iter, tol, bias=False, verbose=False):
+
+        numlayers = len(initthetas)
+
+        # Converting learning rate to vector
+        if isinstance(self.learning_rate, float) | isinstance(self.learning_rate, int):
+            self.learning_rate = ([self.learning_rate] * numlayers)
+
+        # Converting regularizations to vector
+        if isinstance(self.Lambda, float) | isinstance(self.Lambda, int):
+            self.Lambda = ([self.Lambda] * numlayers)
+
         thetas = initthetas
         cost = 1
         costs =[]
         count = 0
-        while (cost > tol) and (count <= max_iter):
-             print("Running backpropagation and obtaining costs for iteration " + str(count))
+        while ((cost > tol) | np.isnan(cost)) and (count <= max_iter):
+             if verbose:
+                 print("Running backpropagation and obtaining costs for iteration " + str(count))
              thetas = self.gradDesc_iter(thetas)
-             _, h = self.forward1(thetas, bias=bias)
-             cost = self.cost(h, thetas)
+             _, h = self.forward1(self.x, thetas, bias=bias)
+             cost = (1/self.numobs)*np.sum(self.cost.f(self.y, h))
              costs.append(cost)
              count += 1
 
         return thetas, costs
 
+    def random_sample(self, frac):
+        random_ind = np.random.choice(self.numobs, int(frac*self.numobs), replace=False)
+        return self.x[random_ind, :], self.y[random_ind, :]
+
+    def stochasticGradDesc(self, frac, initthetas, max_iter, tol, bias=False):
+        # Random Sampling
+        x, y = self.random_sample(frac)
+        self.shift_register_down(x, y)
+        print("x shape: " + str(self.x.shape))
+        print("y shape: " + str(self.y.shape))
+        thetas, cost = self.gradDesc(initthetas, max_iter, tol, bias=bias)
+        self.shift_register_up()
+        return thetas, cost
+
+    def sgd(self, initthetas, num_epochs):
+        # Running num_epochs number of epochs
 
